@@ -38,7 +38,6 @@ class ProgressTracker(Generic[T]):
                  total: Optional[int] = None,
                  callback: Callable[[str], Any] = print,
                  format_callback: Callable[[Dict[str, Any], Set[str]], str] = default_format_callback,
-                 context_manager: bool = False,
                  every_n_percent: Optional[float] = None,
                  every_n_records: Optional[int] = None,
                  every_n_seconds: Optional[float] = None,
@@ -48,7 +47,6 @@ class ProgressTracker(Generic[T]):
                  report_last_record: bool = False) -> None:
 
         self.iterable = iterable
-        self.context_manager = context_manager
 
         self.total: Optional[int]
         try:
@@ -87,43 +85,40 @@ class ProgressTracker(Generic[T]):
         self.report_raised_this_record = False
 
     def __iter__(self) -> Iterable[T]:
-        def iter_helper() -> Iterable[T]:
-            if self.timeout is not None:
-                self.timeout.reset()
+        if self.start_time is None:
+            self.start_time = datetime.utcnow()
+        if self.timeout is not None:
+            self.timeout.reset()
+        if self.idle_timeout is not None:
+            self.idle_timeout.reset()
+
+        for record in self.iterable:
+            if self.idle_timeout is not None and self.idle_timeout.is_overdue():
+                # Pause elapsed time here. Report will want this value.
+                self.idle_timeout.stop()
+
+            self.records_seen += 1
+            self.report_raised_this_record = False
+            yield record  # Process record
+
+            reasons_to_report = self.should_report()
+            if reasons_to_report:
+                self.raise_report(reasons_to_report)
+
             if self.idle_timeout is not None:
                 self.idle_timeout.reset()
 
-            for record in self.iterable:
-                if self.idle_timeout is not None and self.idle_timeout.is_overdue():
-                    # Pause elapsed time here. Report will want this value.
-                    self.idle_timeout.stop()
+        if self.report_last_record and self.records_seen > 0 and not self.report_raised_this_record:  # Ensure that we don't break the "Report Creation Invariants".
+            self.raise_report(set([REPORT_LAST_RECORD]))
 
-                self.records_seen += 1
-                self.report_raised_this_record = False
-                yield record  # Process record
-
-                reasons_to_report = self.should_report()
-                if reasons_to_report:
-                    self.raise_report(reasons_to_report)
-
-                if self.idle_timeout is not None:
-                    self.idle_timeout.reset()
-
-            if self.report_last_record and self.records_seen > 0 and not self.report_raised_this_record:  # Ensure that we don't break the "Report Creation Invariants".
-                self.raise_report(set([REPORT_LAST_RECORD]))
-
-        if self.context_manager:
-            yield from iter_helper()
-        else:
-            with self:
-                yield from iter_helper()
+        self.complete()
 
     def __enter__(self) -> 'ProgressTracker':  # https://stackoverflow.com/questions/33533148/how-do-i-specify-that-the-return-type-of-a-method-is-the-same-as-the-class-itsel
         self.start_time = datetime.utcnow()
         return self
 
     def __exit__(self, exc_type: Optional[Type[Exception]], value: Optional[Exception], traceback: Optional[TracebackType]) -> None:
-        self.complete()
+        pass
 
     def raise_report(self, reasons_to_report: Set[str]) -> None:
         assert not self.report_raised_this_record, "`raise_report` called multiple times for a single record."
